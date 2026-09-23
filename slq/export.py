@@ -22,6 +22,8 @@ from collections.abc import Mapping, Sequence
 
 __all__ = [
     "GGML_TYPES",
+    "gguf_name_map",
+    "gguf_name_to_pattern",
     "bits_to_ggml_type",
     "hf_to_gguf_pattern",
     "write_tensor_type_file",
@@ -44,7 +46,12 @@ GGML_TYPES: dict[int, str] = {
 #: Alternative 4-bit type with better quality per bit at the same footprint.
 GGML_TYPE_ALIASES = {"iq4_xs": 4.25, "iq4_nl": 4.5}
 
-#: HuggingFace leaf module name -> GGUF tensor stem.
+#: HuggingFace leaf module name -> GGUF tensor stem. A hand-written fallback for
+#: standard transformer projections; :func:`gguf_name_map` prefers llama.cpp's
+#: own authoritative mapping when gguf-py is importable, which is the only way
+#: to get hybrid architectures right (Qwen3.5's linear-attention layers map
+#: ``in_proj_a -> ssm_alpha``, ``in_proj_z -> attn_gate`` and so on, none of
+#: which is guessable).
 _HF_TO_GGUF = {
     "q_proj": "attn_q",
     "k_proj": "attn_k",
@@ -55,7 +62,49 @@ _HF_TO_GGUF = {
     "down_proj": "ffn_down",
     "qkv_proj": "attn_qkv",
     "gate_up_proj": "ffn_gate_up",
+    # Qwen3.5-style linear-attention blocks.
+    "in_proj_qkv": "attn_qkv",
+    "in_proj_z": "attn_gate",
+    "in_proj_a": "ssm_alpha",
+    "in_proj_b": "ssm_beta",
+    "out_proj": "ssm_out",
+    "conv1d": "ssm_conv1d",
 }
+
+
+def gguf_name_map(arch: str, n_layers: int):
+    """Return llama.cpp's own HF-to-GGUF tensor name mapper, if available.
+
+    Hand-maintained name tables go stale and cannot cover architectures that
+    did not exist when they were written. llama.cpp ships the authoritative
+    mapping in ``gguf-py``; use it whenever it can be imported.
+
+    Args:
+        arch: A ``gguf.constants.MODEL_ARCH`` member name, e.g. ``"QWEN35"``.
+        n_layers: Block count, which the mapper needs to expand ``{bid}``.
+
+    Returns:
+        A callable ``hf_name -> gguf_name | None``, or ``None`` if gguf-py is
+        not importable or the architecture is unknown.
+    """
+    try:
+        from gguf.constants import MODEL_ARCH
+        from gguf.tensor_mapping import get_tensor_name_map
+    except ImportError:
+        return None
+    member = getattr(MODEL_ARCH, arch, None)
+    if member is None:
+        return None
+    mapper = get_tensor_name_map(member, n_layers)
+
+    def lookup(name: str) -> str | None:
+        base = name[: -len(".weight")] if name.endswith(".weight") else name
+        # Multimodal checkpoints nest the text tower; the mapper expects the
+        # flat form.
+        base = base.replace("model.language_model.", "model.")
+        return mapper.get_name(base)
+
+    return lookup
 
 _LAYER_RE = re.compile(r"(?:^|\.)(?:layers|h|blocks)\.(\d+)\.")
 
@@ -101,12 +150,23 @@ def hf_to_gguf_pattern(name: str) -> str | None:
     return rf"\.{m.group(1)}\.{stem}\.weight"
 
 
+def gguf_name_to_pattern(name: str) -> str:
+    """Escape a concrete GGUF tensor name into a regex matching just that tensor.
+
+    ``blk.7.ffn_down`` -> ``blk\\.7\\.ffn_down\\.weight``. The dots are escaped so
+    ``blk.1.`` cannot match ``blk.17.``.
+    """
+    stem = name[: -len(".weight")] if name.endswith(".weight") else name
+    return re.escape(stem) + r"\.weight"
+
+
 def write_tensor_type_file(
     path: str,
     assignment: Mapping[str, int],
     *,
     type_map: Mapping[int, str] | None = None,
     skip_unmapped: bool = True,
+    names_are_gguf: bool = False,
 ) -> dict[str, str]:
     """Write an allocation in ``--tensor-type-file`` format.
 
@@ -116,6 +176,9 @@ def write_tensor_type_file(
         type_map: Override the bitwidth-to-ggml-type mapping.
         skip_unmapped: Silently drop names with no GGUF counterpart (norms,
             embeddings). If ``False``, raise on the first one.
+        names_are_gguf: Treat the keys as GGUF tensor names already, escaping
+            them directly instead of translating from HuggingFace paths. Use
+            this when the allocation was built against llama.cpp's own mapper.
 
     Returns:
         The written ``{pattern: ggml_type}`` mapping.
@@ -126,7 +189,7 @@ def write_tensor_type_file(
     types = dict(type_map or GGML_TYPES)
     out: dict[str, str] = {}
     for name, bits in sorted(assignment.items()):
-        pattern = hf_to_gguf_pattern(name)
+        pattern = gguf_name_to_pattern(name) if names_are_gguf else hf_to_gguf_pattern(name)
         if pattern is None:
             if skip_unmapped:
                 continue
