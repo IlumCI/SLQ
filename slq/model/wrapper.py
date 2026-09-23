@@ -72,11 +72,15 @@ class QuantizableModel:
         self.calibration = list(calibration)
         if not self.calibration:
             raise ValueError("at least one calibration batch is required")
-        self.policy = policy or GroupingPolicy()
-        self.bank = bank or WeightBank()
-        self.forward_fn = forward or (lambda b: model(b))
+        self.policy = policy if policy is not None else GroupingPolicy()
+        # An empty WeightBank is falsy (__len__ == 0), so `bank or WeightBank()`
+        # would silently discard a caller's freshly-built bank and substitute a
+        # default one -- different bitwidths, group size and quantizer than
+        # asked for. Test identity explicitly.
+        self.bank = bank if bank is not None else WeightBank()
+        self.forward_fn = forward if forward is not None else (lambda b: model(b))
         self.topk = topk
-        self.act_quant = act_quant or ActQuantConfig(bits=None)
+        self.act_quant = act_quant if act_quant is not None else ActQuantConfig(bits=None)
 
         self.model.eval()
         self._layers: dict[str, _LayerRecord] = {}

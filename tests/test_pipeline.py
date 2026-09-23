@@ -126,6 +126,47 @@ def test_unknown_group_raises(qmodel):
         qmodel.apply({"not-a-group": 4})
 
 
+def test_supplied_bank_is_not_replaced():
+    """Regression: an empty WeightBank is falsy via __len__.
+
+    `self.bank = bank or WeightBank()` therefore discarded the caller's bank
+    and substituted a default one, so the requested bitwidths, group size and
+    quantizer were silently ignored -- and, through the pipeline, so were the
+    corresponding SLQConfig fields.
+    """
+    torch.manual_seed(0)
+    model = ReferenceTransformer(ReferenceConfig(num_layers=1, vocab_size=64))
+    calib = [torch.randint(0, 64, (1, 8))]
+    bank = WeightBank(bitwidths=(4, 8), method="rtn", group_size=64, symmetric=True)
+    assert bool(bank) is True, "an empty bank must still be truthy"
+
+    qm = QuantizableModel(model, calib, bank=bank)
+    assert qm.bank is bank
+    assert qm.bank.bitwidths == (4, 8)
+    assert qm.bank.method == "rtn"
+    qm.build_bank()
+    assert len(qm.bank) == 2 * len(qm.layer_names)
+
+
+def test_pipeline_honours_config_quantizer_and_bitwidths():
+    """The config's quantization settings must reach the bank."""
+    from slq.pipeline import SLQConfig, run_slq
+
+    torch.manual_seed(0)
+    model = ReferenceTransformer(ReferenceConfig(num_layers=1, vocab_size=64))
+    calib = [torch.randint(0, 64, (1, 8)) for _ in range(2)]
+    res = run_slq(
+        model,
+        calib,
+        SLQConfig(bitwidths=(4, 8), permutations=1, target="dl", target_ear=0.5,
+                  quantizer="rtn", group_size=64, symmetric=True),
+    )
+    assert res.model.bank.bitwidths == (4, 8)
+    assert res.model.bank.method == "rtn"
+    assert res.model.bank.symmetric is True
+    assert res.model.bank.group_size == 64
+
+
 def test_requires_calibration():
     model = ReferenceTransformer(ReferenceConfig(num_layers=1))
     with pytest.raises(ValueError, match="calibration"):

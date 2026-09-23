@@ -100,7 +100,7 @@ def build_groups(
         Groups in deterministic order, each with its aggregate parameter count.
         Excluded layers are dropped and stay in full precision.
     """
-    policy = policy or GroupingPolicy()
+    policy = policy if policy is not None else GroupingPolicy()
     groups: dict[str, LayerGroup] = {}
 
     for name, numel in layers:

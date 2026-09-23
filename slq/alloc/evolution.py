@@ -148,7 +148,7 @@ def evolutionary_search(
     Returns:
         The best feasible configuration found.
     """
-    cfg = config or EvolutionConfig()
+    cfg = config if config is not None else EvolutionConfig()
     rng = random.Random(cfg.seed)
     bits = sorted(bitwidths)
 

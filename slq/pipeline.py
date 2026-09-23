@@ -187,8 +187,8 @@ def run_slq(
         measure against the wrong baseline. Call ``result.model.restore()``
         first, or load a fresh model per run.
     """
-    cfg = config or SLQConfig()
-    fwd = forward or (lambda b: model(b))
+    cfg = config if config is not None else SLQConfig()
+    fwd = forward if forward is not None else (lambda b: model(b))
 
     # -- 1. Difficulty migration ------------------------------------------- #
     report: SmoothReport | None = None

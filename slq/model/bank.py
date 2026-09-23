@@ -175,6 +175,15 @@ class WeightBank:
     def __len__(self) -> int:
         return len(self._store)
 
+    def __bool__(self) -> bool:
+        """A bank is always truthy, even when empty.
+
+        Without this, ``__len__`` makes a freshly-built bank falsy, so the
+        common ``bank or WeightBank()`` idiom silently replaces a caller's
+        configured bank with a default one.
+        """
+        return True
+
     # ------------------------------------------------------------------ #
     # Persistence
     # ------------------------------------------------------------------ #
