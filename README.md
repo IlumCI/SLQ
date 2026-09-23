@@ -256,6 +256,14 @@ perplexity, and SLQ's advantage over llama.cpp's own tuned mixture is inside
 the confidence interval — a wash on that test. See `docs/RESULTS.md` for what
 that does and does not establish.
 
+**Against a tuned competitor, SLQ loses.** Paired KL comparison against BF16
+logits on Qwen3-0.6B: llama.cpp `q4_k_m` 86.21%, unsloth `UD-Q4_K_XL` 87.12%,
+SLQ 86.67% top-token agreement (all ±0.28%). Unsloth's hand-tuned allocation is
+4.2% smaller than SLQ's *and* 0.44 points better. If the goal is a deployable
+model, download a UD quant rather than building an allocation with this.
+`docs/RESULTS.md` records what would have to change for that to move — chiefly
+calibration size, which was 4 windows here against the paper's 512 samples.
+
 Two caveats are documented in full in `docs/RESULTS.md`, because either one
 reverses the result: grouping coarser than the sensitivity structure (block
 rather than per-layer) loses to uniform outright, and the additive prediction

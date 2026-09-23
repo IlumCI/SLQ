@@ -259,7 +259,53 @@ The test that would settle it, and which has not been run: rebuild the GGUF from
 the measured Shapley database, size-matched exactly to `q4_k_m`, with enough
 perplexity chunks to bring the confidence interval below the effect size.
 
-## 7. Cost
+## 7. Against a tuned competitor: SLQ loses
+
+The comparisons above pit SLQ against uniform allocation. The question that
+decides whether any of this is worth deploying is different: does a *measured*
+sensitivity database beat a *hand-tuned heuristic*? Unsloth's "UD" dynamic
+quants are the same idea -- per-tensor bitwidths chosen to spend a budget well
+-- arrived at by tuning rather than measurement.
+
+Measured with llama.cpp's `--kl-divergence` against stored BF16 logits, so the
+comparison is paired on identical tokens. Top-token agreement carries a +/-0.28%
+confidence interval, tight enough to resolve fractions of a point, where
+perplexity's +/-0.73 could not resolve anything.
+
+| model | size | top-token agreement vs BF16 |
+|---|---|---|
+| llama.cpp `q4_k_m` | 0.391 GB | 86.209 +/- 0.279 % |
+| unsloth `UD-Q4_K_XL` | 0.399 GB | **87.118 +/- 0.271 %** |
+| SLQ, measured Shapley | 0.416 GB | 86.673 +/- 0.275 % |
+
+**Unsloth's heuristic strictly dominates.** Its file is 4.2% smaller than SLQ's
+and still scores 0.44 points higher, a gap outside both confidence intervals.
+SLQ does beat llama.cpp's stock mixture by 0.46 points, but only while spending
+6.4% more space, which is not a win.
+
+The practical conclusion for anyone considering this pipeline for deployment:
+download a UD quant. Building an SLQ allocation costs a full-precision
+conversion of the source model and hours of sensitivity estimation to produce
+something this measurement says is worse.
+
+### What would have to change for that verdict to move
+
+Stated as hypotheses, because none of them were tested:
+
+- **Calibration size.** This used 4 windows of 256 tokens. The paper uses 512
+  samples. A 128x difference in the data the sensitivity is estimated from is
+  the most likely single cause.
+- **Permutations.** `P = 1`, the cheapest setting the estimator admits.
+- **No importance matrix.** Unsloth's builds use imatrix data, which llama.cpp
+  applies during quantization. That alone commonly moves quality more than the
+  choice of bitwidth allocation does.
+- **Model size.** 0.6B is the least favourable case for non-uniform allocation
+  by the paper's own size trend, where a 32B model reached task-losslessness at
+  3.59 bpp against 4.72 for an 8B.
+
+Each is plausible and each is worth a few tenths of a point. None is evidence.
+
+## 8. Cost
 
 | stage | time |
 |---|---|
