@@ -250,6 +250,12 @@ Uniform needs 0.13–0.42 more bits per parameter for the same fidelity. The
 solver also independently recovers the paper's K/V-are-most-sensitive finding
 (v_proj 6.93 and k_proj 6.50 mean bits, against 4.4–4.5 for q/o/gate).
 
+**End to end through llama.cpp**, a real GGUF scored on WikiText-2: F16 20.22,
+plain `q4_k_m` 21.89, SLQ 21.85 (all +/-0.7). Quantizing to ~4 bits costs ~8%
+perplexity, and SLQ's advantage over llama.cpp's own tuned mixture is inside
+the confidence interval — a wash on that test. See `docs/RESULTS.md` for what
+that does and does not establish.
+
 Two caveats are documented in full in `docs/RESULTS.md`, because either one
 reverses the result: grouping coarser than the sensitivity structure (block
 rather than per-layer) loses to uniform outright, and the additive prediction

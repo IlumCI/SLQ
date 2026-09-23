@@ -222,7 +222,44 @@ As a correctness check, prediction is *exact* at uniform bitwidths
 (error 0.00000 at 8, 6 and 4 bits), which is Shapley's efficiency property:
 the marginals of a full switch telescope to the total.
 
-## 6. Cost
+## 6. End-to-end perplexity through llama.cpp
+
+The measurements above are EAR and KL on calibration data. This one is the
+deliverable itself: a real GGUF, quantized by `llama-quantize`, scored with
+`llama-perplexity` on WikiText-2 (40 chunks at 512 context).
+
+| model | size | perplexity | vs F16 |
+|---|---|---|---|
+| F16 reference | 1.51 GB | 20.2163 +/- 0.67 | -- |
+| plain `q4_k_m` | 0.524 GB | 21.8936 +/- 0.73 | +8.3% |
+| SLQ allocation | 0.547 GB | 21.8452 +/- 0.73 | +8.1% |
+
+Two conclusions, neither flattering.
+
+**Quantizing to ~4 bits costs about 8% perplexity.** That is a real degradation,
+consistent with the EAR sweep where 4-bit scores 0.888 against 0.992 at 8-bit.
+Nothing here supports calling 4-bit quantization lossless on a model this size.
+
+**SLQ did not measurably beat llama.cpp's own mixture.** The 0.05 gap is well
+inside the +/-0.73 confidence intervals, and the SLQ file is 4.4% larger, so at
+best this is a wash.
+
+Two qualifications, offered as context rather than excuse:
+
+- This allocation was built from a hand-set per-projection prior, not from the
+  measured Shapley database. It therefore tests a guess at sensitivity, not the
+  estimator. The runs that used measured sensitivity showed a consistent but
+  small advantage (+0.005 to +0.016 EAR at equal size, Section 5).
+- `q4_k_m` is not a uniform baseline. Reading the quantized file back shows it
+  already assigns Q6_K to 30 tensors: llama.cpp ships a hand-tuned non-uniform
+  mixture of its own. The comparison is against a tuned competitor, not a naive
+  one.
+
+The test that would settle it, and which has not been run: rebuild the GGUF from
+the measured Shapley database, size-matched exactly to `q4_k_m`, with enough
+perplexity chunks to bring the confidence interval below the effect size.
+
+## 7. Cost
 
 | stage | time |
 |---|---|
