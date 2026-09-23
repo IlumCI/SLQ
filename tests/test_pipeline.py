@@ -255,3 +255,52 @@ def test_smoothing_inside_the_pipeline_runs():
     )
     assert res.smooth_report is not None
     assert res.smooth_report.summary()["sites"] > 0
+
+
+# ---------------------------------------------------------------- memory --
+
+
+def test_memory_report_accounts_for_all_three_copies():
+    """Model, masters and bank coexist; an OOM mid-run is expensive to discover."""
+    torch.manual_seed(0)
+    model = ReferenceTransformer(ReferenceConfig(num_layers=2, vocab_size=128))
+    calib = [torch.randint(0, 128, (1, 8))]
+    qm = QuantizableModel(model, calib, bank=WeightBank(bitwidths=(4, 6, 8), method="rtn"))
+    rep = qm.memory_report()
+    assert rep["model_gb"] > 0 and rep["masters_gb"] > 0
+    # Three candidate bitwidths, one uint8 code per parameter each.
+    assert rep["bank_gb_estimated"] == pytest.approx(qm.total_params * 3 / 1e9)
+    assert rep["total_gb_estimated"] == pytest.approx(
+        rep["model_gb"] + rep["masters_gb"] + rep["bank_gb_estimated"]
+    )
+
+
+def test_half_precision_masters_halve_their_cost():
+    torch.manual_seed(0)
+    model = ReferenceTransformer(ReferenceConfig(num_layers=2, vocab_size=128))
+    calib = [torch.randint(0, 128, (1, 8))]
+    full = QuantizableModel(model, calib, bank=WeightBank(bitwidths=(4,), method="rtn"))
+    half = QuantizableModel(
+        model, calib, bank=WeightBank(bitwidths=(4,), method="rtn"),
+        master_dtype=torch.float16,
+    )
+    assert half.memory_report()["masters_gb"] == pytest.approx(
+        full.memory_report()["masters_gb"] / 2, rel=1e-6
+    )
+
+
+def test_half_precision_masters_still_restore():
+    torch.manual_seed(0)
+    model = ReferenceTransformer(ReferenceConfig(num_layers=2, vocab_size=128))
+    calib = [torch.randint(0, 128, (1, 8))]
+    qm = QuantizableModel(
+        model, calib, bank=WeightBank(bitwidths=(4, 8), method="rtn"),
+        master_dtype=torch.float16,
+    )
+    qm.build_bank()
+    before = model.layers[0].mlp.up_proj.weight.data.clone()
+    qm.apply(qm.uniform(4))
+    qm.restore()
+    after = model.layers[0].mlp.up_proj.weight.data
+    # float16 masters round-trip to within half-precision resolution.
+    assert torch.allclose(before, after, atol=1e-3)

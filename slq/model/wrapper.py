@@ -56,6 +56,11 @@ class QuantizableModel:
         topk: Truncation ``K`` for EAR and KL (10 in the paper).
         act_quant: Activation quantizer for W+A configurations. Disabled by
             default, matching the paper's weight-only main results.
+        master_dtype: Dtype for the retained full-precision master weights.
+            These are a second copy of every quantizable weight, so on a model
+            near the memory limit they are worth storing in half precision:
+            ``torch.float16`` halves their cost at the price of a small
+            round-trip error when restoring. ``None`` keeps the model's dtype.
     """
 
     def __init__(
@@ -67,6 +72,7 @@ class QuantizableModel:
         forward: Callable[[torch.Tensor], torch.Tensor] | None = None,
         topk: int = DEFAULT_TOPK,
         act_quant: ActQuantConfig | None = None,
+        master_dtype: torch.dtype | None = None,
     ) -> None:
         self.model = model
         self.calibration = list(calibration)
@@ -83,13 +89,17 @@ class QuantizableModel:
         self.act_quant = act_quant if act_quant is not None else ActQuantConfig(bits=None)
 
         self.model.eval()
+        self.master_dtype = master_dtype
         self._layers: dict[str, _LayerRecord] = {}
         for name, m in model.named_modules():
             if isinstance(m, nn.Linear) and not self.policy.is_excluded(name):
+                master = m.weight.detach().clone()
+                if master_dtype is not None:
+                    master = master.to(master_dtype)
                 self._layers[name] = _LayerRecord(
                     name=name,
                     module=m,
-                    fp_weight=m.weight.detach().clone(),
+                    fp_weight=master,
                     numel=m.weight.numel(),
                 )
         if not self._layers:
@@ -128,12 +138,43 @@ class QuantizableModel:
     # Calibration
     # ------------------------------------------------------------------ #
 
+    def memory_report(self) -> dict[str, float]:
+        """Approximate resident bytes, which is what decides feasibility.
+
+        Three copies of the weights coexist during a search: the model's own
+        parameters, the full-precision masters kept for restoration, and the
+        bank's integer codes (one byte per parameter per candidate bitwidth).
+        On a 1.7B model at four candidate bitwidths that is roughly
+        6.8 + 5.6 + 5.6 GB, which will not fit in 16 GB. Check this before
+        starting a long run rather than discovering it through an OOM kill.
+        """
+        params = sum(r.numel for r in self._layers.values())
+        model_bytes = sum(
+            p.numel() * p.element_size() for p in self.model.parameters()
+        )
+        master_bytes = sum(
+            r.fp_weight.numel() * r.fp_weight.element_size()
+            for r in self._layers.values()
+        )
+        bank_bytes = params * len(self.bank.bitwidths)  # uint8 codes
+        return {
+            "model_gb": model_bytes / 1e9,
+            "masters_gb": master_bytes / 1e9,
+            "bank_gb_estimated": bank_bytes / 1e9,
+            "total_gb_estimated": (model_bytes + master_bytes + bank_bytes) / 1e9,
+        }
+
     @torch.no_grad()
     def capture_hessians(self) -> dict[str, torch.Tensor]:
-        """Accumulate ``H = 2 X X^T`` for every quantizable layer in one pass."""
+        """Accumulate ``H = 2 X X^T`` for every quantizable layer in one pass.
+
+        Memory warning: this holds one ``[in, in]`` float32 matrix per layer
+        simultaneously. On a model with wide MLPs that is gigabytes; use
+        ``method="rtn"`` on the bank if it does not fit.
+        """
         from slq.quant.gptq import GPTQQuantizer
 
-        quantizers = {n: GPTQQuantizer(r.fp_weight) for n, r in self._layers.items()}
+        quantizers = {n: GPTQQuantizer(r.fp_weight.float()) for n, r in self._layers.items()}
         handles = []
 
         def hook(name: str):
@@ -170,7 +211,7 @@ class QuantizableModel:
             hessians = self.capture_hessians()
         for name, rec in self._layers.items():
             h = hessians.get(name) if hessians else None
-            self.bank.add_layer(name, rec.fp_weight, hessian=h)
+            self.bank.add_layer(name, rec.fp_weight.float(), hessian=h)
             if h is not None:
                 hessians[name] = torch.zeros((0, 0))  # free as we go
         return self.bank
@@ -194,7 +235,7 @@ class QuantizableModel:
             for layer in self._group_for(gname):
                 rec = self._layers[layer]
                 if bits is None:
-                    rec.module.weight.data.copy_(rec.fp_weight)
+                    rec.module.weight.data.copy_(rec.fp_weight.to(rec.module.weight.dtype))
                 else:
                     q = self.bank.get(layer, bits)
                     rec.module.weight.data.copy_(
