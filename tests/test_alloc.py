@@ -219,6 +219,34 @@ def test_monotonicity_is_enforced():
         assert db.ear_drop["g0"][b_lo] >= db.ear_drop["g0"][b_hi] - 1e-12
 
 
+def test_monotonicity_does_not_flatten_the_database():
+    """Regression: a running minimum would propagate the zero cost at b_max.
+
+    Costs are pinned to zero at the reference bitwidth, so enforcing
+    monotonicity in the wrong direction silently zeroes every entry -- the
+    database still looks well-formed, but every configuration then predicts
+    identical fidelity and the search collapses to the minimum bitwidth.
+    """
+    db = make_db()
+    db.ear_drop["g0"][3] = 0.0001  # noise: 3 bits looks cheaper than 4
+    before_2bit = db.ear_drop["g0"][2]
+    db.enforce_monotonic()
+    assert db.ear_drop["g0"][2] == pytest.approx(before_2bit)
+    assert db.ear_drop["g0"][3] >= db.ear_drop["g0"][4]
+    assert any(db.ear_drop[g][2] > 0 for g in db.groups)
+
+
+def test_search_discriminates_across_targets_after_monotonicity():
+    """A flattened database would return the same bitwidth for every target."""
+    db = make_db()
+    db.enforce_monotonic()
+    bits = [
+        search_distribution_lossless(db, target_ear=t, effective_bits_fn=eff).average_bits
+        for t in (0.95, 0.99, 0.999)
+    ]
+    assert bits[0] < bits[-1], f"search did not discriminate: {bits}"
+
+
 def test_prediction_anchors_on_baseline():
     db = make_db()
     db.baseline_ear = 0.75

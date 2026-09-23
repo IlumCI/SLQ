@@ -105,17 +105,23 @@ class SensitivityDatabase:
     def enforce_monotonic(self) -> SensitivityDatabase:
         """Make costs non-increasing in bitwidth.
 
-        Sampling noise can leave a group marginally cheaper at ``b`` than at
-        ``b+1``, which lets the ILP buy fidelity by *removing* bits and produces
-        nonsensical allocations. Costs are therefore made monotone by taking a
-        running minimum from the highest bitwidth downward.
+        Degradation must not fall as bitwidth falls: a group quantized to ``b``
+        bits cannot cost less than the same group at ``b+1``. Sampling noise can
+        violate that, which lets the ILP buy fidelity by *removing* bits and
+        produces nonsensical allocations.
+
+        The fix is a running *maximum* walked from the highest bitwidth
+        downward, so each cost is raised to at least the cost of every coarser
+        grid above it. Note the direction: costs are pinned to zero at
+        ``b_max``, so a running *minimum* would propagate that zero across the
+        whole table and silently flatten the database.
         """
         for table in (self.kl, self.ear_drop):
             for g in self.groups:
-                best = float("inf")
+                worst = -float("inf")
                 for b in sorted(self.bitwidths, reverse=True):
-                    best = min(best, table[g][b])
-                    table[g][b] = best
+                    worst = max(worst, table[g][b])
+                    table[g][b] = worst
         return self
 
     # ------------------------------------------------------------------ #
