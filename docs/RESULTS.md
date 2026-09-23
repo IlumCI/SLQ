@@ -138,7 +138,91 @@ database flattened by the wrong monotonicity direction, the predicted column
 above read a constant 1.0001 and every row of the allocation table collapsed to
 the minimum bitwidth regardless of target.
 
-## 5. Cost
+## 5. Does non-uniform allocation actually beat uniform?
+
+This is SLQ's central claim, so it gets a direct test: same model, same
+quantizer (our GPTQ), same calibration, same bit budget -- only the allocation
+differs. Uniform is interpolated to SLQ's exact bpp, since a uniform
+configuration only exists at integer bitwidths.
+
+Per-layer groups (196), bitwidths `{4, 6, 8}`, 1 Shapley permutation:
+
+| bpp | SLQ EAR | uniform at same bpp | gain |
+|---|---|---|---|
+| 4.399 | 0.92078 | 0.90448 | **+0.0163** |
+| 4.799 | 0.93434 | 0.92002 | **+0.0143** |
+| 5.199 | 0.94664 | 0.93556 | **+0.0111** |
+| 5.599 | 0.95629 | 0.95110 | **+0.0052** |
+
+Equivalently, uniform needs **0.13-0.42 more bits per parameter** to reach the
+same fidelity -- a 2-9% larger model. The margin narrows as the budget grows,
+which is what one expects: there is less to gain from reallocation once every
+layer is already well served.
+
+### The allocation reproduces the paper's Figure 6, partly
+
+Mean assigned bits by projection type at a 5.2 bpp budget:
+
+| projection | mean bits |
+|---|---|
+| v_proj | 6.93 |
+| k_proj | 6.50 |
+| up_proj | 5.36 |
+| down_proj | 4.93 |
+| q_proj | 4.50 |
+| gate_proj | 4.50 |
+| o_proj | 4.43 |
+
+Appendix C.1 reports that the solver "assigns 8 bits to the most sensitive K/V
+projections, 6-7 bits to Q and output projections, and 4-5 bits to the more
+robust MLP layers". K and V coming out clearly on top is reproduced here
+without any architectural prior -- the solver was given only measured
+sensitivities. The Q/O placement is not: the paper puts them mid-range, this
+model puts them at the bottom alongside the MLP. That may be a size effect
+(0.6B against 8B-70B) or a grouped-query-attention head-ratio effect; it is
+recorded as a discrepancy rather than explained.
+
+### Two ways to get this wrong
+
+Both were hit before arriving at the table above, and both are worth stating
+because either one inverts the conclusion.
+
+**Coarse grouping destroys the effect.** An earlier run grouped at *block*
+granularity, forcing all seven projections of a transformer block to share a
+bitwidth. The result was a decisive loss to uniform (EAR 0.553 against 0.895 at
+4.156 bpp). That is expected in hindsight: the gain comes from *within-block*
+variation -- V at ~7 bits beside O at ~4.4 -- and block grouping cannot express
+it. Group at least as finely as the sensitivity structure varies.
+
+**The additive model has a validity floor.** Predicted against measured EAR
+for allocations over the full `{2,3,4,6,8}` range:
+
+| budget | predicted | measured | error |
+|---|---|---|---|
+| 3.2 | 0.842 | 0.324 | **+0.518** |
+| 4.156 | 0.909 | 0.647 | **+0.262** |
+| 5.0 | 0.944 | 0.923 | +0.021 |
+| 6.0 | 0.973 | 0.958 | +0.015 |
+| 7.0 | 0.986 | 0.982 | +0.004 |
+
+Equations 7-8 sum per-group costs, but each group's Shapley value is measured
+largely against a backdrop of *other groups at* `b_max`. One group at 2 bits is
+survivable in that context; ten groups at 2 bits are not, and the sum has no
+way to know. Below ~5 bpp the prediction is not merely noisy, it is wrong by
+more than half an EAR, and the search confidently selects configurations that
+destroy the model.
+
+Restricting the candidate set to `{4, 6, 8}` holds the error at or below 0.02
+everywhere. The paper's own operating range sits inside the valid region -- its
+kernels are 4-8 bit and it reports DL at 5.0-6.6 bpp -- so it never encounters
+this, but the boundary is not stated there and it matters for anyone extending
+`B` downward.
+
+As a correctness check, prediction is *exact* at uniform bitwidths
+(error 0.00000 at 8, 6 and 4 bits), which is Shapley's efficiency property:
+the marginals of a full switch telescope to the total.
+
+## 6. Cost
 
 | stage | time |
 |---|---|

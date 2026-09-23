@@ -236,6 +236,25 @@ deviation 1 above: unnormalized, every EAR in this table would be clipped at
 0.787, the 8- and 6-bit rows would be indistinguishable, and `EAR ≥ 0.99` would
 be unreachable by a lossless quantizer.
 
+**Non-uniform allocation beats uniform**, same quantizer and calibration, with
+uniform interpolated to SLQ's exact bpp:
+
+| bpp | SLQ EAR | uniform at same bpp | gain |
+|---|---|---|---|
+| 4.399 | 0.92078 | 0.90448 | +0.0163 |
+| 4.799 | 0.93434 | 0.92002 | +0.0143 |
+| 5.199 | 0.94664 | 0.93556 | +0.0111 |
+| 5.599 | 0.95629 | 0.95110 | +0.0052 |
+
+Uniform needs 0.13–0.42 more bits per parameter for the same fidelity. The
+solver also independently recovers the paper's K/V-are-most-sensitive finding
+(v_proj 6.93 and k_proj 6.50 mean bits, against 4.4–4.5 for q/o/gate).
+
+Two caveats are documented in full in `docs/RESULTS.md`, because either one
+reverses the result: grouping coarser than the sensitivity structure (block
+rather than per-layer) loses to uniform outright, and the additive prediction
+of Eq. 7–8 is invalid below ~5 bpp, where it overestimates EAR by up to 0.52.
+
 ## Tests
 
 ```bash
