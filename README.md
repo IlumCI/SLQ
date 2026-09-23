@@ -210,6 +210,32 @@ slq/
 - **The ILP budget is parameter-weighted**, matching `b̄ = Σ b_ℓ|W_ℓ| / Σ |W_ℓ|`.
   An unweighted budget lets the solver spend bits freely on the largest tensors.
 
+## Validated results
+
+Measured with this implementation on `Qwen/Qwen3-0.6B` (CPU, WikiText-2
+calibration). Full tables in [`docs/RESULTS.md`](docs/RESULTS.md).
+
+- **The γ² law holds on real weights.** Mean `γ ≈ 1.10` across projections,
+  predicting a 1.19–1.24× noise penalty for symmetric grids; measured
+  symmetric/asymmetric MSE ratios are 1.22–1.28.
+- **It transfers to activations.** On post-SiLU activations (`γ = 1.941`,
+  `γ² = 3.77`) the measured ratios are 3.69 at 8-bit and 3.73 at 6-bit.
+- **The uniform sweep is monotone over four orders of magnitude of KL**, from
+  EAR 0.992 / KL 0.0011 at 8-bit to complete collapse at 2-bit.
+
+| bits | bpp | EAR | KL | flips | top-10 mass |
+|---|---|---|---|---|---|
+| 8 | 8.156 | 0.99234 | 0.00106 | 0.011 | 0.7874 |
+| 6 | 6.156 | 0.97107 | 0.00908 | 0.042 | 0.7874 |
+| 4 | 4.156 | 0.88783 | 0.07196 | 0.167 | 0.7874 |
+| 3 | 3.156 | 0.73773 | 0.37770 | 0.350 | 0.7874 |
+| 2 | 2.156 | 0.22528 | 3.62519 | 1.000 | 0.7874 |
+
+The constant top-10 mass of 0.787 is what settles the normalization question in
+deviation 1 above: unnormalized, every EAR in this table would be clipped at
+0.787, the 8- and 6-bit rows would be indistinguishable, and `EAR ≥ 0.99` would
+be unreachable by a lossless quantizer.
+
 ## Tests
 
 ```bash
