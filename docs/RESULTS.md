@@ -100,7 +100,45 @@ which the metric does the job the paper asks of it, and it is the reading its
 stated identity `EAR = 1 - d_TV` requires. See the README for the full argument;
 `normalize=False` recovers the literal form, and `topk_mass` is always reported.
 
-## 4. Cost
+## 4. The search end to end
+
+On the built-in reference model (28 groups, CPU, seconds per run), after the
+sensitivity database is built with 2 Shapley permutations.
+
+**Prediction accuracy.** Equations 7-8 predict a configuration's EAR from the
+database alone, with no forward pass. Against measurement:
+
+| bits | predicted EAR | measured EAR | error |
+|---|---|---|---|
+| 8 | 0.99997 | 0.99997 | +0.00000 |
+| 6 | 0.99985 | 0.99986 | -0.00001 |
+| 4 | 0.99946 | 0.99947 | -0.00001 |
+| 3 | 0.99846 | 0.99852 | -0.00006 |
+| 2 | 0.99396 | 0.99414 | -0.00018 |
+
+Agreement to within 2e-4 is what makes the binary search over bitwidth budgets
+free: it runs entirely on the database.
+
+**Allocation.** Tightening the DL target produces progressively more
+conservative, and progressively less uniform, allocations:
+
+| target EAR | bpp | measured EAR | bitwidth histogram |
+|---|---|---|---|
+| 0.9950 | 2.206 | 0.99772 | {2: 27, 3: 1} |
+| 0.9985 | 2.356 | 0.99846 | {2: 25, 3: 2, 4: 1} |
+| 0.9995 | 2.906 | 0.99931 | {2: 16, 3: 9, 4: 2, 6: 1} |
+| 0.9999 | 4.256 | 0.99972 | {2: 10, 3: 8, 4: 4, 6: 3, 8: 3} |
+
+This is the behaviour the paper's Section 4.1 argues for: the full bitwidth
+range gets used, and a binary `{4, 8}` restriction would have to spend more
+average bits to hit the same constraint.
+
+These numbers also make two of the fixed bugs visible. With the sensitivity
+database flattened by the wrong monotonicity direction, the predicted column
+above read a constant 1.0001 and every row of the allocation table collapsed to
+the minimum bitwidth regardless of target.
+
+## 5. Cost
 
 | stage | time |
 |---|---|
