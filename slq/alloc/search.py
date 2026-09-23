@@ -23,7 +23,12 @@ from dataclasses import dataclass, field
 from slq.alloc.ilp import AllocationResult, solve_allocation
 from slq.sensitivity.database import SensitivityDatabase
 
-__all__ = ["SearchResult", "search_distribution_lossless", "search_task_lossless"]
+__all__ = [
+    "SearchResult",
+    "search_distribution_lossless",
+    "search_memory_budget",
+    "search_task_lossless",
+]
 
 #: Measures actual KL on a concrete assignment. One forward pass.
 MeasureKLFn = Callable[[dict[str, int]], float]
@@ -338,3 +343,75 @@ def _reanchor(
         }
     )
     return result
+
+
+def search_memory_budget(
+    db: SensitivityDatabase,
+    budget_bytes: float,
+    effective_bits_fn: Callable[[int], float] | None = None,
+    solver: str = "auto",
+    overhead_fraction: float = 0.0,
+) -> SearchResult:
+    """Maximize predicted fidelity subject to a hard memory budget.
+
+    The bitwidth-targeted searches above answer "what is the cheapest model
+    meeting this quality bar". Deployment usually asks the opposite question:
+    the RAM is fixed, so spend it as well as possible. This solves the knapsack
+    once, at the largest average bitwidth the budget allows.
+
+    Args:
+        db: Sensitivity database.
+        budget_bytes: Total bytes available for the quantized weights.
+        effective_bits_fn: Nominal-to-realized bitwidth map (Table 7), so the
+            budget accounts for scale and zero-point overhead.
+        solver: Passed to the allocator.
+        overhead_fraction: Reserve this fraction of the budget for runtime
+            overhead -- KV cache, activations, the framework itself. For
+            example 0.15 keeps 15% free.
+
+    Returns:
+        A :class:`SearchResult` whose ``average_bits`` is the realized bits per
+        parameter and whose ``notes`` record the byte accounting.
+
+    Raises:
+        ValueError: If the budget cannot fit even the smallest bitwidth.
+    """
+    if budget_bytes <= 0:
+        raise ValueError(f"budget_bytes must be positive, got {budget_bytes}")
+    usable = budget_bytes * (1.0 - overhead_fraction)
+    total_params = sum(db.numel[g] for g in db.groups)
+    if total_params == 0:
+        raise ValueError("sensitivity database has no parameters")
+
+    # Bits per parameter the budget affords, then solve at that budget.
+    bpp = usable * 8.0 / total_params
+    f = effective_bits_fn or (lambda b: float(b))
+    floor_bpp = f(min(db.bitwidths))
+    if bpp < floor_bpp:
+        need = total_params * floor_bpp / 8.0
+        raise ValueError(
+            f"budget of {budget_bytes / 1e9:.2f} GB affords {bpp:.2f} bits/param, "
+            f"below the smallest available bitwidth ({floor_bpp:.2f}). "
+            f"The smallest configuration needs {need / 1e9:.2f} GB "
+            f"({need / (1 - overhead_fraction) / 1e9:.2f} GB with overhead)."
+        )
+
+    res = _solve(db, min(bpp, f(max(db.bitwidths))), "ear", effective_bits_fn, solver)
+    realized = res.average_bits * total_params / 8.0
+    return SearchResult(
+        assignment=res.assignment,
+        average_bits=res.average_bits,
+        target=f"fit<={budget_bytes / 1e9:.2f}GB",
+        predicted_ear=db.predict_ear(res.assignment),
+        predicted_kl=db.predict_kl(res.assignment),
+        satisfied=realized <= usable * (1 + 1e-9),
+        notes={
+            "budget_bytes": budget_bytes,
+            "usable_bytes": usable,
+            "realized_bytes": realized,
+            "realized_gigabytes": realized / 1e9,
+            "headroom_bytes": usable - realized,
+            "overhead_fraction": overhead_fraction,
+            "bits_per_param_afforded": bpp,
+        },
+    )

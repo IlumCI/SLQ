@@ -263,3 +263,49 @@ def test_database_roundtrips_through_json(tmp_path):
     assert back.baseline_ear == pytest.approx(0.97)
     a = dict.fromkeys(db.groups, 4)
     assert back.predict_ear(a) == pytest.approx(db.predict_ear(a))
+
+
+# ---------------------------------------------------------- memory budget --
+
+
+def test_memory_budget_fits():
+    from slq.alloc import search_memory_budget
+
+    db = make_db(n_groups=8, sizes={f"g{i}": 1_000_000 for i in range(8)})
+    total = sum(db.numel.values())
+    budget = total * 5.0 / 8  # 5 bits per parameter
+    r = search_memory_budget(db, budget, effective_bits_fn=eff)
+    assert r.satisfied
+    assert r.notes["realized_bytes"] <= budget + 1e-6
+
+
+def test_memory_budget_reserves_overhead():
+    from slq.alloc import search_memory_budget
+
+    db = make_db(n_groups=8, sizes={f"g{i}": 1_000_000 for i in range(8)})
+    total = sum(db.numel.values())
+    budget = total * 6.0 / 8
+    full = search_memory_budget(db, budget, effective_bits_fn=eff, overhead_fraction=0.0)
+    reserved = search_memory_budget(db, budget, effective_bits_fn=eff, overhead_fraction=0.25)
+    assert reserved.average_bits < full.average_bits
+    assert reserved.notes["realized_bytes"] <= budget * 0.75 + 1e-6
+
+
+def test_memory_budget_too_small_explains_the_minimum():
+    from slq.alloc import search_memory_budget
+
+    db = make_db(n_groups=4, sizes={f"g{i}": 1_000_000 for i in range(4)})
+    with pytest.raises(ValueError, match="below the smallest available bitwidth"):
+        search_memory_budget(db, 100.0, effective_bits_fn=eff)
+
+
+def test_memory_budget_spends_more_bits_when_given_more():
+    from slq.alloc import search_memory_budget
+
+    db = make_db(n_groups=8, sizes={f"g{i}": 1_000_000 for i in range(8)})
+    total = sum(db.numel.values())
+    prev = 0.0
+    for bpp in (3.0, 4.0, 5.0, 6.0):
+        r = search_memory_budget(db, total * bpp / 8, effective_bits_fn=eff)
+        assert r.average_bits > prev
+        prev = r.average_bits
