@@ -256,13 +256,26 @@ perplexity, and SLQ's advantage over llama.cpp's own tuned mixture is inside
 the confidence interval — a wash on that test. See `docs/RESULTS.md` for what
 that does and does not establish.
 
-**Against a tuned competitor, SLQ loses.** Paired KL comparison against BF16
-logits on Qwen3-0.6B: llama.cpp `q4_k_m` 86.21%, unsloth `UD-Q4_K_XL` 87.12%,
-SLQ 86.67% top-token agreement (all ±0.28%). Unsloth's hand-tuned allocation is
-4.2% smaller than SLQ's *and* 0.44 points better. If the goal is a deployable
-model, download a UD quant rather than building an allocation with this.
-`docs/RESULTS.md` records what would have to change for that to move — chiefly
-calibration size, which was 4 windows here against the paper's 512 samples.
+**At matched size, SLQ loses to both competitors.** Paired KL comparison against
+BF16 logits on Qwen3-0.6B, top-token agreement (±0.28%):
+
+| model | size | agreement |
+|---|---|---|
+| llama.cpp `q4_k_m` | 0.3967 GB | **86.21%** |
+| SLQ, size-matched | 0.3967 GB | 84.11% |
+| unsloth `UD-Q4_K_XL` | 0.4054 GB | **87.12%** |
+| SLQ, size-matched | 0.4054 GB | 85.35% |
+
+Margins of 2.10 and 1.77 points, roughly six times the confidence intervals.
+**If you want a model to run, download a UD quant** — building an allocation
+with this costs a full-precision conversion and hours of estimation to produce
+something measurably worse.
+
+The leading explanation is a mismatch this repository introduced: sensitivity is
+measured under SLQ's own INT grid but the deployed format is a k-quant, whose
+super-block structure behaves differently at the same nominal width. Estimating
+under one quantizer and allocating for another does not transfer.
+`docs/RESULTS.md` has the full diagnosis.
 
 Two caveats are documented in full in `docs/RESULTS.md`, because either one
 reverses the result: grouping coarser than the sensitivity structure (block

@@ -272,16 +272,42 @@ comparison is paired on identical tokens. Top-token agreement carries a +/-0.28%
 confidence interval, tight enough to resolve fractions of a point, where
 perplexity's +/-0.73 could not resolve anything.
 
+Sizes are matched exactly, by budgeting with llama.cpp's realized k-quant
+widths (`GGML_BPW`) rather than SLQ's own INT-grid accounting. An earlier
+attempt that did not do this produced SLQ files 4-6% oversized and reversed the
+sign of the result.
+
 | model | size | top-token agreement vs BF16 |
 |---|---|---|
-| llama.cpp `q4_k_m` | 0.391 GB | 86.209 +/- 0.279 % |
-| unsloth `UD-Q4_K_XL` | 0.399 GB | **87.118 +/- 0.271 %** |
-| SLQ, measured Shapley | 0.416 GB | 86.673 +/- 0.275 % |
+| llama.cpp `q4_k_m` | 0.3967 GB | **86.209 +/- 0.279 %** |
+| SLQ, size-matched | 0.3967 GB | 84.111 +/- 0.296 % |
+| unsloth `UD-Q4_K_XL` | 0.4054 GB | **87.118 +/- 0.271 %** |
+| SLQ, size-matched | 0.4054 GB | 85.353 +/- 0.286 % |
 
-**Unsloth's heuristic strictly dominates.** Its file is 4.2% smaller than SLQ's
-and still scores 0.44 points higher, a gap outside both confidence intervals.
-SLQ does beat llama.cpp's stock mixture by 0.46 points, but only while spending
-6.4% more space, which is not a win.
+**SLQ loses to both, at identical size.** It trails llama.cpp's stock mixture by
+2.10 points and unsloth's tuned allocation by 1.77, margins roughly six times
+the confidence intervals. The machinery does respond correctly to a larger
+budget -- 85.35 at 0.4054 GB against 84.11 at 0.3967 GB -- it simply sits below
+both competitors throughout.
+
+### Why: the sensitivity was measured under the wrong quantizer
+
+Comparing the assignments is instructive. `q4_k_m` puts everything at Q4_K and
+bumps exactly two tensor kinds -- `attn_v` and `ffn_down` -- to Q6_K in half the
+layers. SLQ instead scatters Q5_K and Q6_K thinly across all seven kinds.
+
+The likely cause is a mismatch this repository introduced, not a flaw in the
+paper. The sensitivity database is built by quantizing weights with SLQ's own
+asymmetric INT grid at group 128 and measuring the resulting EAR. The deployed
+format is a k-quant: a super-block with its own 6-bit scale structure and
+materially better error behaviour at the same nominal width. Sensitivity
+estimated under one quantizer does not transfer to allocating for another, and
+llama.cpp's heuristic was tuned on the format it actually ships.
+
+Fixing this means measuring sensitivity *through* llama.cpp's quantizer --
+quantizing each tensor to each candidate ggml type, rebuilding the model, and
+measuring EAR from that -- rather than through `slq.quant.grid`. That is a
+redesign of the estimation loop, not a hyperparameter change.
 
 The practical conclusion for anyone considering this pipeline for deployment:
 download a UD quant. Building an SLQ allocation costs a full-precision
