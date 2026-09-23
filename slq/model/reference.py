@@ -22,8 +22,8 @@ __all__ = ["ReferenceConfig", "ReferenceTransformer", "RMSNorm", "make_peaked_re
 @dataclass
 class ReferenceConfig:
     vocab_size: int = 512
-    hidden_size: int = 128
-    intermediate_size: int = 256
+    hidden_size: int = 64
+    intermediate_size: int = 128
     num_layers: int = 4
     num_heads: int = 4
     max_seq_len: int = 128
@@ -123,7 +123,7 @@ class ReferenceTransformer(nn.Module):
 
 def make_peaked_reference(
     cfg: ReferenceConfig | None = None,
-    steps: int = 400,
+    steps: int = 500,
     batch_size: int = 8,
     seq_len: int = 48,
     lr: float = 3e-3,
@@ -158,7 +158,10 @@ def make_peaked_reference(
     cfg = cfg or ReferenceConfig()
     model = ReferenceTransformer(cfg)
 
-    n_sym = max(8, cfg.vocab_size // 16)
+    # A wide symbol alphabet relative to the model width keeps the network from
+    # being so over-parameterized that quantization costs it nothing; without
+    # that, every bitwidth scores identically and the search has no signal.
+    n_sym = max(8, cfg.vocab_size // 4)
     gen = torch.Generator().manual_seed(seed + 1)
     # A fixed bigram map: with probability `p_det` the next token is a
     # deterministic function of the current one, otherwise it is uniform noise.

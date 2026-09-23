@@ -74,6 +74,10 @@ def _reshape_groups(w: torch.Tensor, group_size: int) -> tuple[torch.Tensor, int
         raise ValueError(f"expected a 2-D weight matrix, got shape {tuple(w.shape)}")
     out_features, in_features = w.shape
     gs = in_features if group_size == -1 else group_size
+    # A group cannot span more than one row, so clamp to the row width. This is
+    # what deployed kernels do for narrow layers and keeps small models usable
+    # with the paper's default group size of 128.
+    gs = min(gs, in_features)
     if in_features % gs != 0:
         raise ValueError(
             f"in_features={in_features} is not divisible by group_size={gs}; "
@@ -212,6 +216,6 @@ def effective_bits(cfg: QuantConfig, in_features: int | None = None) -> float:
             raise ValueError("in_features is required for per-channel group_size=-1")
         gs = in_features
     else:
-        gs = cfg.group_size
+        gs = cfg.group_size if in_features is None else min(cfg.group_size, in_features)
     overhead = _SCALE_BITS[cfg.fmt] + (0 if cfg.symmetric else _ZERO_BITS[cfg.fmt])
     return cfg.bits + overhead / gs

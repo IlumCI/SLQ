@@ -208,6 +208,13 @@ class QuantizableModel:
         """Return every layer to full precision."""
         self.apply({g.name: None for g in self.groups})
 
+    def __enter__(self) -> QuantizableModel:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """Restore full precision, so a wrapped model is safe to reuse."""
+        self.restore()
+
     def uniform(self, bits: int | None) -> dict[str, int | None]:
         """An assignment placing every group at the same bitwidth."""
         return {g.name: bits for g in self.groups}

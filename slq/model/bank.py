@@ -116,24 +116,28 @@ class WeightBank:
         w = weight.detach().to(torch.float32)
         targets = tuple(bitwidths) if bitwidths is not None else self.bitwidths
 
+        # One quantizer per layer, so the Cholesky is shared across bitwidths.
+        gptq = None
+        if self.method == "gptq":
+            if hessian is None:
+                raise ValueError(
+                    f"layer {name!r}: method='gptq' requires a Hessian; "
+                    "run a calibration pass first or use method='rtn'"
+                )
+            gptq = GPTQQuantizer(w)
+            gptq.hessian = hessian.to(torch.float32)
+            gptq.n_samples = 1
+            gptq.prepare(percdamp=self.gptq_percdamp, act_order=self.gptq_act_order)
+
         for b in targets:
             cfg = self.config(b)
-            if self.method == "gptq":
-                if hessian is None:
-                    raise ValueError(
-                        f"layer {name!r}: method='gptq' requires a Hessian; "
-                        "run a calibration pass first or use method='rtn'"
-                    )
-                gptq = GPTQQuantizer(w)
-                gptq.hessian = hessian.to(torch.float32)
-                gptq.n_samples = 1
+            if gptq is not None:
                 w_hat = gptq.quantize(
                     cfg,
                     block_size=self.gptq_block_size,
                     percdamp=self.gptq_percdamp,
                     act_order=self.gptq_act_order,
                 )
-                # Re-encode W_hat onto the grid so only codes need storing.
                 codes, scale, zero = quantize(w_hat, cfg)
             else:
                 codes, scale, zero = quantize(w, cfg)
@@ -145,6 +149,8 @@ class WeightBank:
                 cfg=cfg,
                 shape=tuple(w.shape),
             )
+        if gptq is not None:
+            gptq.free()
 
     def get(self, name: str, bits: int) -> QuantizedWeight:
         try:

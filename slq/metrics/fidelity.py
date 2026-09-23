@@ -6,14 +6,25 @@ distribution ``p`` and are accumulated over calibration token positions:
     D_KL = (1/N) sum_i sum_{k in T_i} p_i(k) log(p_i(k) / q_i(k))
     EAR  = (1/N) sum_i sum_{k in T_i} min(p_i(k), q_i(k))          (Eq. 3)
 
-Note on the KL: as written in the paper the sum is truncated to ``T_i`` without
-renormalizing ``p`` and ``q`` over that support, so it is not a true divergence
-and can go slightly negative when the quantized model puts *more* mass than the
-reference on the reference's own top-K. On a sharply peaked LLM the truncated
-and renormalized forms agree to several decimals, but the bitwidth search
-binary-searches on a KL threshold, so ``kl_mode="renormalized"`` is offered to
-guarantee non-negativity. ``"truncated"`` is the default because it is what the
-paper specifies.
+On normalization
+----------------
+"Restricted to the top-K tokens under ``p_i``" is implemented here as
+*conditioning* on that support: ``p`` and ``q`` are renormalized over ``T_i``
+before the metrics are taken. Three things force that reading.
+
+1. The paper states EAR equals ``1 - d_TV(p, q)`` and that it is "the maximum
+   probability that two random variables ``X ~ p`` and ``Y ~ q`` can be coupled
+   to agree". Both identities require ``p`` and ``q`` to be probability
+   distributions; on a truncated, unnormalized vector they simply do not hold.
+2. Without renormalizing, ``EAR <= sum_{k in T_i} p_i(k)``, so EAR is capped by
+   the top-K mass. Measured on Qwen3-0.6B over WikiText-2 that cap is ~0.75,
+   which would make the paper's ``EAR >= 0.99`` target unreachable by any
+   quantizer, including a perfect one.
+3. Unnormalized, ``EAR(p, p) < 1`` and the truncated KL can go negative, so
+   neither metric is well-behaved as a search objective.
+
+Set ``normalize=False`` to get the literal truncated forms; ``topk_mass`` is
+always reported so the size of the truncation stays visible.
 
 EAR equals ``1 - d_TV(p, q)``: the maximum probability that ``X ~ p`` and
 ``Y ~ q`` can be coupled to agree. Both are computed from the same forward
@@ -29,7 +40,6 @@ import torch
 __all__ = ["FidelityResult", "FidelityMeter", "fidelity", "decision_flip_rates"]
 
 DEFAULT_TOPK = 10
-KL_MODES = ("truncated", "renormalized")
 
 
 @dataclass(frozen=True)
@@ -57,13 +67,10 @@ class FidelityResult:
     def ear_normalized(self) -> float:
         """EAR rescaled by the top-K mass it is bounded by.
 
-        ``EAR <= sum_{k in T_i} p_i(k) = topk_mass`` by construction. For a real
-        LLM the top-10 mass is typically >0.95, so the two nearly coincide and
-        the raw EAR is the number to target. If ``topk_mass`` is far below 1 the
-        distribution is not peaked -- an untrained or very high-entropy model --
-        and a raw EAR threshold such as 0.99 is unreachable for reasons that
-        have nothing to do with quantization. This rescaling makes such cases
-        legible; it is a diagnostic, not the paper's metric.
+        Only meaningful when the metrics were taken with ``normalize=False``,
+        where ``EAR <= topk_mass`` by construction. With the default
+        ``normalize=True`` the conditioning is already applied and this returns
+        a value above 1; use :attr:`ear` instead.
         """
         if not self.topk_mass or self.topk_mass != self.topk_mass:
             return float("nan")
@@ -82,7 +89,7 @@ def fidelity(
     topk: int = DEFAULT_TOPK,
     is_logits: bool = True,
     eps: float = 1e-10,
-    kl_mode: str = "truncated",
+    normalize: bool = True,
 ) -> FidelityResult:
     """Compute EAR, top-K KL, decision-flip rate and disagreement margin.
 
@@ -93,9 +100,10 @@ def fidelity(
         is_logits: Whether the inputs are logits (softmax is applied) or
             already-normalized probabilities.
         eps: Floor guarding the logarithm and the division.
-        kl_mode: ``"truncated"`` reproduces the paper's formula verbatim;
-            ``"renormalized"`` rescales ``p`` and ``q`` over the top-K support
-            first, yielding a proper non-negative divergence.
+        normalize: Condition ``p`` and ``q`` on the top-K support before
+            measuring, so EAR equals ``1 - d_TV`` and KL is a proper
+            divergence. See the module docstring. ``False`` gives the literal
+            truncated sums.
 
     Returns:
         A :class:`FidelityResult` aggregated over all token positions.
@@ -112,18 +120,18 @@ def fidelity(
     k = min(topk, vocab)
 
     # Restrict both distributions to the top-K support of p (Section 3.2).
-    if kl_mode not in KL_MODES:
-        raise ValueError(f"kl_mode must be one of {KL_MODES}, got {kl_mode!r}")
     p_top, idx = torch.topk(p_full, k, dim=-1)
     q_top = torch.gather(q_full, 1, idx)
+    mass = p_top.sum(dim=-1)
 
-    ear = torch.minimum(p_top, q_top).sum(dim=-1)
-    if kl_mode == "renormalized":
-        p_kl = p_top / p_top.sum(dim=-1, keepdim=True).clamp_min(eps)
-        q_kl = q_top / q_top.sum(dim=-1, keepdim=True).clamp_min(eps)
+    if normalize:
+        p_m = p_top / mass.unsqueeze(-1).clamp_min(eps)
+        q_m = q_top / q_top.sum(dim=-1, keepdim=True).clamp_min(eps)
     else:
-        p_kl, q_kl = p_top, q_top
-    kl = (p_kl * (p_kl.clamp_min(eps).log() - q_kl.clamp_min(eps).log())).sum(dim=-1)
+        p_m, q_m = p_top, q_top
+
+    ear = torch.minimum(p_m, q_m).sum(dim=-1)
+    kl = (p_m * (p_m.clamp_min(eps).log() - q_m.clamp_min(eps).log())).sum(dim=-1)
 
     # Decision flips: positions where the argmax token changes.
     ref_arg = idx[:, 0]
@@ -144,7 +152,7 @@ def fidelity(
         flip_rate=n_flips / n_pos,
         margin_at_disagreement=margin,
         positions=n_pos,
-        topk_mass=float(p_top.sum(dim=-1).mean()),
+        topk_mass=float(mass.mean()),
     )
 
 
@@ -155,7 +163,7 @@ class FidelityMeter:
     topk: int = DEFAULT_TOPK
     is_logits: bool = True
     eps: float = 1e-10
-    kl_mode: str = "truncated"
+    normalize: bool = True
     _ear: float = field(default=0.0, init=False)
     _kl: float = field(default=0.0, init=False)
     _flips: int = field(default=0, init=False)
@@ -164,7 +172,7 @@ class FidelityMeter:
     _n: int = field(default=0, init=False)
 
     def update(self, reference: torch.Tensor, candidate: torch.Tensor) -> None:
-        r = fidelity(reference, candidate, self.topk, self.is_logits, self.eps, self.kl_mode)
+        r = fidelity(reference, candidate, self.topk, self.is_logits, self.eps, self.normalize)
         if r.positions == 0:
             return
         self._ear += r.ear * r.positions
