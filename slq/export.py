@@ -21,7 +21,9 @@ import re
 from collections.abc import Mapping, Sequence
 
 __all__ = [
+    "GGML_BPW",
     "GGML_TYPES",
+    "ggml_effective_bits",
     "gguf_name_map",
     "gguf_name_to_pattern",
     "bits_to_ggml_type",
@@ -45,6 +47,49 @@ GGML_TYPES: dict[int, str] = {
 
 #: Alternative 4-bit type with better quality per bit at the same footprint.
 GGML_TYPE_ALIASES = {"iq4_xs": 4.25, "iq4_nl": 4.5}
+
+#: Realized bits per weight of each ggml type, from llama.cpp's block layouts.
+#: These differ from SLQ's own INT-grid accounting (Table 7): a q4_K block is
+#: 4.5 bpw against the 4.156 of an asymmetric INT4 group of 128, because the
+#: k-quant super-block carries its own scale and min structure. Budgeting a
+#: llama.cpp target with SLQ's numbers under-counts by ~7% and produces a file
+#: that overshoots, so use these whenever the destination is a GGUF.
+GGML_BPW: dict[str, float] = {
+    "q2_K": 2.625,
+    "q3_K": 3.4375,
+    "q4_K": 4.5,
+    "q5_K": 5.5,
+    "q6_K": 6.5625,
+    "q8_0": 8.5,
+    "iq4_xs": 4.25,
+    "iq4_nl": 4.5,
+    "f16": 16.0,
+    "bf16": 16.0,
+    "f32": 32.0,
+}
+
+
+def ggml_effective_bits(type_map: Mapping[int, str] | None = None):
+    """Bitwidth-to-realized-bpw map for a llama.cpp destination.
+
+    Pass the result as ``effective_bits_fn`` to the allocator so the memory
+    budget is expressed in the sizes the deployed format actually takes.
+
+    Args:
+        type_map: Bitwidth-to-ggml-type mapping; defaults to :data:`GGML_TYPES`.
+
+    Returns:
+        A callable ``bits -> bits per weight``.
+    """
+    types = dict(type_map or GGML_TYPES)
+
+    def f(bits: int) -> float:
+        try:
+            return GGML_BPW[types[bits]]
+        except KeyError:
+            raise ValueError(f"no realized bpw known for {bits} bits") from None
+
+    return f
 
 #: HuggingFace leaf module name -> GGUF tensor stem. A hand-written fallback for
 #: standard transformer projections; :func:`gguf_name_map` prefers llama.cpp's

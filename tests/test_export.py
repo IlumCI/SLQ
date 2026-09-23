@@ -4,6 +4,7 @@ import pytest
 
 from slq.export import (
     GGML_TYPES,
+    ggml_effective_bits,
     allocation_report,
     bits_to_ggml_type,
     hf_to_gguf_pattern,
@@ -105,3 +106,40 @@ def test_allocation_report_accounting():
     assert rep["mean_bits"] == pytest.approx((8 * 1000 + 4 * 3000) / 4000)
     assert rep["bytes"] == pytest.approx((8 * 1000 + 4 * 3000) / 8)
     assert rep["histogram"] == {4: 1, 8: 1}
+
+
+def test_ggml_bpw_differs_from_slq_int_accounting():
+    """A llama.cpp budget must use the k-quant block sizes, not SLQ's grid.
+
+    Budgeting a GGUF with SLQ's own INT-grid accounting (b + 20/128)
+    under-counts by ~7%, because a q4_K super-block carries its own scale and
+    min structure: 4.5 bpw against 4.156. Two size-matched comparisons were
+    invalidated by this before it was caught, both times producing an SLQ file
+    4-6% larger than the baseline it was supposed to match.
+    """
+    from slq.quant.grid import QuantConfig, effective_bits
+
+    f = ggml_effective_bits()
+    for bits in (4, 5, 6, 8):
+        assert f(bits) > effective_bits(QuantConfig(bits, 128))
+    assert f(4) == pytest.approx(4.5)
+    assert f(6) == pytest.approx(6.5625)
+    assert f(8) == pytest.approx(8.5)
+
+
+def test_ggml_effective_bits_is_monotonic():
+    f = ggml_effective_bits()
+    assert f(4) < f(5) < f(6) < f(8)
+
+
+def test_ggml_effective_bits_rejects_unknown_bitwidth():
+    f = ggml_effective_bits()
+    with pytest.raises(ValueError, match="no realized bpw"):
+        f(7)
+
+
+def test_every_ggml_type_has_a_known_width():
+    from slq.export import GGML_BPW
+
+    for name in GGML_TYPES.values():
+        assert name in GGML_BPW
